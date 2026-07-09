@@ -1,3 +1,9 @@
+---
+noteId: "b48bf6b07bb311f19e37d9565cbc6d12"
+tags: []
+
+---
+
 # A2A + MCP Demo: Weather Agent x Activity Planner Agent
 
 A small, runnable prototype that shows two patterns from the course working
@@ -47,6 +53,35 @@ setup. Every weather response is tagged `"source": "xweather"` or
 `"source": "mock"` so you can always tell which one you got; the Activity
 Planner surfaces this as `[weather data: xweather|mock]` in its replies.
 
+### Tracing with LangSmith (optional)
+
+Set these in `.env` to send traces to [LangSmith](https://smith.langchain.com):
+
+```bash
+LANGSMITH_TRACING=true      # required even if the key below is set
+LANGSMITH_API_KEY=...
+LANGSMITH_PROJECT=a2a-demo  # optional, defaults to "default"
+```
+
+What gets traced, end-to-end across both agent processes as **one nested
+trace tree** (via LangSmith's distributed-tracing headers, see
+`common/tracing.py`):
+
+- **MCP tool calls** (`mcp::get_current_weather`, `mcp::recommend_activity`, ...) — tool name, arguments, result, latency.
+- **A2A protocol calls**, including agent discovery — `a2a::discover_agent -> <url>` (the `/.well-known/agent.json` fetch) and `a2a::message_send -> <url>` (the JSON-RPC call), both client- and server-side.
+- **Latency** at every step above — LangSmith records start/end time on every span automatically.
+
+What does **not** get traced: token usage. LangSmith only reports token
+counts for LLM calls, and neither agent calls an LLM — both use regex-based
+parsing for their "brain" by design, so this demo needs no LLM API key on
+top of XWeather + LangSmith. An empty token count in your traces is
+expected, not a bug. (`weather_agent/agent.py`'s docstring notes where an
+LLM-driven tool-calling loop would slot in if you want to extend this.)
+
+Without `LANGSMITH_TRACING=true` + a valid key, every `@traceable` call is
+a no-op — the demo behaves identically either way. Each agent prints
+`LangSmith tracing: ON/OFF` on startup so you can confirm which mode it's in.
+
 ## Why a custom A2A layer instead of `a2a-sdk`?
 
 `common/a2a_protocol.py` is a ~150-line implementation of the *shape* of the
@@ -62,8 +97,11 @@ prototype to the real thing.
 ```
 a2a-demo/
 ├── common/
-│   ├── a2a_protocol.py     # Agent Card + JSON-RPC message/send (client + server)
-│   └── mcp_client.py       # stdio MCP session helper
+│   ├── a2a_protocol.py     # Agent Card + JSON-RPC message/send (client + server), traced
+│   ├── mcp_client.py       # stdio MCP session helper, traced
+│   ├── agent_launcher.py   # starts/stops both agent subprocesses (used by run_demo.py + gradio_app.py)
+│   ├── env.py              # loads .env as an import side effect
+│   └── tracing.py          # LangSmith setup notes + startup status line
 ├── weather_agent/
 │   ├── mcp_server.py       # MCP server: get_current_weather, get_forecast
 │   └── agent.py            # A2A server wrapping the MCP server
@@ -72,7 +110,9 @@ a2a-demo/
 │   └── agent.py            # A2A server; also an A2A *client* of the Weather Agent
 ├── notebook/
 │   └── a2a_prototype.ipynb # step-by-step prototype: MCP tools -> A2A agents -> orchestration
-└── run_demo.py             # launches both agents and runs sample queries end-to-end
+├── run_demo.py             # launches both agents and runs sample queries end-to-end
+├── gradio_app.py           # chat frontend for the Activity Planner Agent
+└── .env.example            # template for XWeather / LangSmith credentials
 ```
 
 ## Running it
@@ -86,6 +126,17 @@ uv run python run_demo.py
 This starts both agent processes, waits for them to come up, sends a few
 sample requests to the Activity Planner Agent, and prints the full
 agent-to-agent exchange, then shuts everything down.
+
+### Chat frontend (Gradio)
+
+```bash
+uv run python gradio_app.py
+```
+
+Starts both agents the same way as `run_demo.py`, then serves a chat UI at
+`http://127.0.0.1:7860` — type a request like *"what should we do in Paris,
+FR today?"* and it's sent to the Activity Planner Agent over A2A. Ctrl+C (or
+any SIGTERM) shuts down both agent subprocesses along with the UI.
 
 To run the agents by hand instead (e.g. to poke at them with `curl`):
 
@@ -116,7 +167,8 @@ interactive-free, and travels as a single portable file.
 
 ```mermaid
 flowchart TB
-    User(["User / Client"])
+    User(["User / Client\n(Gradio chat UI or run_demo.py)"])
+    LS[["LangSmith\n(optional tracing)"]]
 
     subgraph AA["Activity Planner Agent  (:8002)"]
         direction TB
@@ -157,11 +209,15 @@ flowchart TB
     WA_MCP -- "MCP: tool result" --> WA_MCPClient
     AA_A2A -- "A2A: Task(completed)\nweather-aware activity plan" --> User
 
+    AA_A2A -. "trace: handle_message,\nMCP + A2A spans, latency" .-> LS
+    WA_A2A -. "trace: handle_message,\nMCP call, latency" .-> LS
+
     style User fill:#4c8bf5,color:#fff
     style AA fill:#e8f0fe,color:#1a1a1a
     style WA fill:#e8f0fe,color:#1a1a1a
     style AA_MCP fill:#fef7e0,color:#1a1a1a
     style WA_MCP fill:#fef7e0,color:#1a1a1a
+    style LS fill:#f3e8fd,color:#1a1a1a,stroke-dasharray: 4 3
 ```
 
 **Two protocols, two jobs:**
@@ -169,3 +225,6 @@ flowchart TB
   each with its own Agent Card, discoverable and callable over HTTP/JSON-RPC.
 - **MCP** (each agent <-> its own subprocess server) — an agent's private
   toolbox, not exposed to other agents.
+- **LangSmith** (dashed, optional) — observes both, stitching the MCP tool
+  calls and A2A calls from *both* processes into one nested trace per
+  request. See "Tracing with LangSmith" above.

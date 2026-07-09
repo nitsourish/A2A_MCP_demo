@@ -20,6 +20,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
+from langsmith import traceable
 
 import sys
 
@@ -28,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import common.env  # noqa: E402,F401 - loads .env as an import side effect
 from common.a2a_protocol import AgentCard, AgentSkill, HandlerBox, build_a2a_app  # noqa: E402
 from common.mcp_client import call_tool, mcp_session  # noqa: E402
+from common.tracing import tracing_status  # noqa: E402
 
 MCP_SERVER_SCRIPT = str(Path(__file__).resolve().parent / "mcp_server.py")
 
@@ -62,6 +64,7 @@ def _parse_request(text: str) -> tuple[str, int]:
 
 
 def make_handler(session):
+    @traceable(run_type="chain", name="weather_agent.handle_message")
     async def handle_message(text: str) -> str:
         location, days_ahead = _parse_request(text)
         if days_ahead == 0:
@@ -118,4 +121,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8001)
     args = parser.parse_args()
+    print(tracing_status())
     uvicorn.run(build_app(), host="127.0.0.1", port=args.port)

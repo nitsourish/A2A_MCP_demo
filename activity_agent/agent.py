@@ -27,12 +27,14 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
+from langsmith import traceable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import common.env  # noqa: E402,F401 - loads .env as an import side effect
 from common.a2a_protocol import A2AClient, AgentCard, AgentSkill, HandlerBox, build_a2a_app  # noqa: E402
 from common.mcp_client import call_tool, mcp_session  # noqa: E402
+from common.tracing import tracing_status  # noqa: E402
 
 MCP_SERVER_SCRIPT = str(Path(__file__).resolve().parent / "mcp_server.py")
 
@@ -60,6 +62,7 @@ def _extract_location(text: str) -> str:
 
 
 def make_handler(mcp_session_obj, weather_client: A2AClient):
+    @traceable(run_type="chain", name="activity_agent.handle_message")
     async def handle_message(text: str) -> str:
         location = _extract_location(text)
 
@@ -76,8 +79,10 @@ def make_handler(mcp_session_obj, weather_client: A2AClient):
             {"condition": condition, "temperature_c": temperature_c, "wind_kph": wind_kph},
         )
         plan = json.loads(raw)
+        # "about Xh" rather than "~Xh" - a bare tilde is Markdown strikethrough
+        # syntax, and this text gets rendered as Markdown by the Gradio frontend.
         suggestions = "; ".join(
-            f"{s['name']} (~{s['duration_hr']}h, tip: {s['tip']})" for s in plan["suggestions"]
+            f"{s['name']} (about {s['duration_hr']}h, tip: {s['tip']})" for s in plan["suggestions"]
         )
 
         source_match = re.search(r"\(source:\s*(\w+)\)", weather_reply)
@@ -131,4 +136,5 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8002)
     parser.add_argument("--weather-agent-url", default="http://localhost:8001")
     args = parser.parse_args()
+    print(tracing_status())
     uvicorn.run(build_app(args.weather_agent_url), host="127.0.0.1", port=args.port)

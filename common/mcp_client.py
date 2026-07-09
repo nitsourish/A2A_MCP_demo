@@ -14,6 +14,8 @@ import sys
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
+from langsmith import traceable
+from langsmith.run_helpers import get_current_run_tree
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -36,8 +38,17 @@ async def mcp_session(server_script: str) -> AsyncIterator[ClientSession]:
             yield session
 
 
+def _drop_session(inputs: dict[str, Any]) -> dict[str, Any]:
+    """`session` isn't JSON-serializable and isn't useful in a trace anyway."""
+    return {k: v for k, v in inputs.items() if k != "session"}
+
+
+@traceable(run_type="tool", process_inputs=_drop_session)
 async def call_tool(session: ClientSession, tool_name: str, arguments: dict[str, Any]) -> str:
-    """Call an MCP tool and return its text content."""
+    """Call an MCP tool (traced) and return its text content."""
+    if run_tree := get_current_run_tree():
+        run_tree.name = f"mcp::{tool_name}"
+
     result = await session.call_tool(tool_name, arguments=arguments)
     if result.isError:
         raise RuntimeError(f"MCP tool '{tool_name}' failed: {result.content}")

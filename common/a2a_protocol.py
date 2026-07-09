@@ -27,6 +27,9 @@ from typing import Any, Awaitable, Callable
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from langsmith import traceable
+from langsmith.middleware import TracingMiddleware
+from langsmith.run_helpers import get_current_run_tree
 from pydantic import BaseModel, Field
 
 # --------------------------------------------------------------------------
@@ -127,6 +130,11 @@ def build_a2a_app(card: AgentCard, handler_box: HandlerBox) -> FastAPI:
     """Build a FastAPI app exposing the agent-card + `message/send` JSON-RPC method."""
 
     app = FastAPI(title=card.name)
+    # Continues a trace propagated via the `langsmith-trace` header (set by
+    # A2AClient below) so a call chain spanning multiple agent processes
+    # shows up as one nested trace in LangSmith, instead of two disconnected
+    # ones. Does nothing if the header is absent or tracing is disabled.
+    app.add_middleware(TracingMiddleware)
 
     @app.get("/.well-known/agent.json")
     async def agent_card() -> AgentCard:
@@ -173,19 +181,37 @@ class A2AClient:
         self.base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(timeout=timeout)
 
+    @traceable(run_type="chain", name="a2a::discover_agent")
     async def get_agent_card(self) -> AgentCard:
-        resp = await self._client.get(f"{self.base_url}/.well-known/agent.json")
+        """Fetch the Agent Card (traced as an A2A discovery call)."""
+        run_tree = get_current_run_tree()
+        headers = {}
+        if run_tree:
+            run_tree.name = f"a2a::discover_agent -> {self.base_url}"
+            headers = run_tree.to_headers()
+
+        resp = await self._client.get(f"{self.base_url}/.well-known/agent.json", headers=headers)
         resp.raise_for_status()
         return AgentCard.model_validate(resp.json())
 
+    @traceable(run_type="chain", name="a2a::message_send")
     async def send_message(self, text: str) -> str:
-        """Send a text message to the agent and return its reply text."""
+        """Send a text message to the agent and return its reply text (traced,
+        propagating this call's trace context to the receiving agent so its
+        own handler - and any MCP tool calls or further A2A calls it makes -
+        shows up nested under this run in LangSmith)."""
+        run_tree = get_current_run_tree()
+        headers = {}
+        if run_tree:
+            run_tree.name = f"a2a::message_send -> {self.base_url}"
+            headers = run_tree.to_headers()
+
         rpc_req = RpcRequest(
             id=uuid.uuid4().hex,
             method="message/send",
             params={"message": Message.user_text(text).model_dump()},
         )
-        resp = await self._client.post(self.base_url + "/", json=rpc_req.model_dump())
+        resp = await self._client.post(self.base_url + "/", json=rpc_req.model_dump(), headers=headers)
         resp.raise_for_status()
         body = resp.json()
 
